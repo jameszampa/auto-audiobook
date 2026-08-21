@@ -19,8 +19,11 @@ server, so nothing leaves the machine and there is no per-character API cost.
 
 ## Requirements
 
-- A running **chatterbox-tts** server (default `http://localhost:8004`)
 - **Python 3.10+** and **ffmpeg** on `PATH`
+- A **chatterbox-tts** server (default `http://localhost:8004`) — `run.sh` will
+  offer to install one for you
+- For that install: **Docker** with NVIDIA GPU support, and room for a
+  multi-GB image plus model weights
 
 ## Quick start
 
@@ -30,12 +33,47 @@ server, so nothing leaves the machine and there is no per-character API cost.
 
 Then open **http://127.0.0.1:8005**.
 
-The header shows engine status. If it reads *engine down*, start the TTS server
-(see the [Chatterbox-TTS-Server](https://github.com/devnen/Chatterbox-TTS-Server)
-README for the Docker setup) and set `CHATTERBOX_URL` if it is not on
-`http://localhost:8004`.
-
 *engine idle — model unloaded* is normal: see below.
+
+## The TTS server
+
+Narration is done by a [chatterbox-tts](https://github.com/devnen/Chatterbox-TTS-Server)
+server. If nothing answers on `CHATTERBOX_URL`, `run.sh` offers to set one up
+and then waits for it to come up:
+
+1. Clones the upstream repo into `CHATTERBOX_DIR` (`../chatterbox-tts-server`).
+2. Picks the compose file matching the GPU, using the mapping from upstream's
+   own README: `docker-compose-cu128.yml` for Blackwell (sm_120),
+   `docker-compose-cu130.yml` for sm_121 / CUDA 13, and the default
+   `docker-compose.yml` (CUDA 12.1) otherwise. Override with
+   `CHATTERBOX_COMPOSE_FILE`.
+3. Writes `compose.auto-audiobook.yml` next to it — an overlay, so the checkout
+   stays pristine and updatable. It blanks the `HF_TOKEN=YOUR_TOKEN_HERE`
+   placeholder every upstream compose file ships (nothing on the server reads
+   it, but `huggingface_hub` does, and sending a placeholder as a bearer token
+   turns model downloads into 401s that look like network faults), and pins the
+   published port to the one in `CHATTERBOX_URL`.
+4. `docker compose up -d`, which builds the image on first run.
+
+Expect 10–30 minutes the first time: a multi-GB CUDA image, then the model
+weights on first start. After that the container has `restart: unless-stopped`
+and is simply there.
+
+What it will not do:
+
+- **Prompt when there is no terminal.** Under a service unit it skips the
+  install rather than hanging. Set `AUDIOBOOK_INSTALL_TTS=1` to install
+  unattended, or `0` to never touch Docker.
+- **Duplicate a server you already have.** It looks for a checkout in
+  `CHATTERBOX_DIR`, `../chatterbox`, `../Chatterbox-TTS-Server` and `~`. One it
+  installed itself is restarted; one you set up yourself is left alone, with
+  the command to start it printed instead — it will not guess which compose
+  file you built it from and race your stack.
+- **Install anything for a remote `CHATTERBOX_URL`**, which is someone else's
+  server to run.
+- **Quietly fall back to CPU.** Without an NVIDIA GPU it prints what to do
+  instead. Chatterbox does run on CPU (`CHATTERBOX_COMPOSE_FILE=docker-compose-cpu.yml`),
+  but a book takes days rather than hours.
 
 ## The GPU is only busy while you are making something
 
@@ -128,6 +166,11 @@ All optional, set as environment variables:
 | `AUDIOBOOK_MIN_CHAPTER_CHARS` | `300` | shorter sections start unticked |
 | `AUDIOBOOK_M4B_BITRATE` | `64k` | AAC bitrate |
 | `AUDIOBOOK_DATA_DIR` | `./data` | where books and output live |
+| `AUDIOBOOK_INSTALL_TTS` | `auto` | install chatterbox-tts when it is missing: `auto` asks on a terminal, `1` always, `0` never |
+| `CHATTERBOX_DIR` | `../chatterbox-tts-server` | where an installed TTS server lives |
+| `CHATTERBOX_REPO` | upstream GitHub URL | what to clone |
+| `CHATTERBOX_COMPOSE_FILE` | picked from the GPU | upstream compose file to build from |
+| `CHATTERBOX_WAIT_SEC` | `1200` | how long to wait for a freshly started TTS server |
 
 ## Tests
 
