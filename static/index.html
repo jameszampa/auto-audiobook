@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>auto-audiobook</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+</head>
+<body>
+<header>
+  <h1>auto&#8209;audiobook</h1>
+  <div id="engine" class="pill pill-wait">checking engine&hellip;</div>
+</header>
+
+<main>
+  <!-- Step 1: the book -->
+  <section class="card">
+    <h2><span class="step">1</span> Drop your book</h2>
+    <div id="drop" class="drop" tabindex="0" role="button"
+         aria-label="Drop an EPUB file here or click to browse">
+      <div class="drop-inner">
+        <div class="drop-icon">&#128214;</div>
+        <p><strong>Drop an .epub here</strong></p>
+        <p class="muted">or click to browse</p>
+      </div>
+      <input type="file" id="epub-input" accept=".epub" hidden>
+    </div>
+    <div id="book-error" class="error" hidden></div>
+
+    <div id="book" hidden>
+      <div class="book-head">
+        <div>
+          <div id="book-title" class="book-title"></div>
+          <div id="book-author" class="muted"></div>
+        </div>
+        <button id="book-reset" class="btn btn-ghost" type="button">Change book</button>
+      </div>
+      <div class="chapter-toolbar">
+        <span id="chapter-summary" class="muted"></span>
+        <span class="spacer"></span>
+        <button id="select-all" class="btn btn-ghost btn-sm" type="button">All</button>
+        <button id="select-none" class="btn btn-ghost btn-sm" type="button">None</button>
+      </div>
+      <ul id="chapters" class="chapters"></ul>
+      <p class="hint">Front matter such as copyright and contents pages is
+        unticked automatically. Tick anything you do want narrated.</p>
+    </div>
+  </section>
+
+  <!-- Step 2: the voice -->
+  <section class="card">
+    <h2><span class="step">2</span> Pick a voice</h2>
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" data-mode="clone" role="tab">Cloned voices</button>
+      <button class="tab" data-mode="predefined" role="tab">Built&#8209;in voices</button>
+    </div>
+    <div id="voice-list" class="voices"><p class="muted">Loading voices&hellip;</p></div>
+
+    <div class="upload-row">
+      <label class="btn btn-ghost btn-sm" for="voice-input">Upload a voice clone .wav</label>
+      <input type="file" id="voice-input" accept=".wav,.mp3" hidden>
+      <span id="voice-upload-status" class="muted"></span>
+    </div>
+
+    <details class="advanced">
+      <summary>Narration settings</summary>
+      <div class="grid">
+        <label>Expressiveness
+          <input type="range" id="exaggeration" min="0.25" max="2" step="0.05" value="0.5">
+          <output id="exaggeration-out">0.50</output>
+          <span class="hint">Lower is steadier. 0.5 suits long-form narration.</span>
+        </label>
+        <label>Pacing (CFG)
+          <input type="range" id="cfg_weight" min="0.2" max="1" step="0.05" value="0.5">
+          <output id="cfg_weight-out">0.50</output>
+          <span class="hint">Higher sticks closer to the reference delivery.</span>
+        </label>
+        <label>Temperature
+          <input type="range" id="temperature" min="0.1" max="1.5" step="0.05" value="0.8">
+          <output id="temperature-out">0.80</output>
+          <span class="hint">Randomness per chunk.</span>
+        </label>
+        <label>Speed
+          <input type="range" id="speed_factor" min="0.5" max="2" step="0.05" value="1">
+          <output id="speed_factor-out">1.00</output>
+          <span class="hint">Applied after generation.</span>
+        </label>
+        <label>Seed
+          <input type="number" id="seed" value="12345" min="0" step="1">
+          <span class="hint">Keep this fixed. A changing seed makes the
+            narrator's timbre drift between chunks.</span>
+        </label>
+      </div>
+    </details>
+  </section>
+
+  <!-- Step 3: run -->
+  <section class="card">
+    <h2><span class="step">3</span> Generate</h2>
+    <div class="run-row">
+      <button id="run" class="btn btn-primary" type="button" disabled>Run</button>
+      <div id="estimate" class="muted"></div>
+    </div>
+    <div id="run-error" class="error" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2>Audiobooks</h2>
+    <div id="jobs"><p class="muted">No runs yet.</p></div>
+  </section>
+</main>
+
+<audio id="player" hidden></audio>
+<script src="/static/app.js"></script>
+</body>
+</html>
