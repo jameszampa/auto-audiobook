@@ -1,0 +1,27 @@
+# The WSL/systemd deployment this project used before moving to a native
+# Windows scheduled task (see deploy/auto-audiobook.ps1 and the README).
+#
+# Kept so the WSL path stays reinstallable. Recovered from the running unit
+# after the original file was lost from ~/.config/systemd/user/.
+#
+#   cp deploy/auto-audiobook.service ~/.config/systemd/user/
+#   # replace REPO below with the checkout path as WSL sees it, e.g.
+#   #   /mnt/c/Users/you/workspace/auto-audiobook
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now auto-audiobook
+#
+# Note it binds the same port as the Windows task - run one or the other.
+
+[Unit]
+Description=auto-audiobook (epub -> m4b) web app on http://127.0.0.1:8005
+After=basic.target network-online.target mnt-c.mount
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=REPO
+ExecStart=REPO/run.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,3 +1,3 @@
-"""auto-audiobook: turn an .epub into a voice-cloned audiobook via chatterbox-tts."""
+"""Turn an .epub into a voice-cloned audiobook via Step-Audio-EditX."""
 
 __version__ = "1.0.0"

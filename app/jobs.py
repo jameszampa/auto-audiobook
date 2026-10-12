@@ -26,7 +26,7 @@ from .audio import (
 )
 from .config import SETTINGS
 from .engine import EngineLifecycle
-from .tts_client import ChatterboxClient, TTSError, VoiceParams
+from .tts_client import StepAudioEditXClient, TTSError, VoiceParams
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, client: ChatterboxClient, engine: EngineLifecycle):
+    def __init__(self, client: StepAudioEditXClient, engine: EngineLifecycle):
         self.client = client
         self.engine = engine
         self.jobs: dict[str, Job] = {}
@@ -169,6 +169,7 @@ class JobManager:
         write_json(directory / "plan.json", {"chapters": chapters})
 
         data = {
+            "tts_engine": "step-audio-editx-v1",
             "id": job_id,
             "book_id": book_id,
             "title": title,
@@ -204,6 +205,8 @@ class JobManager:
         return job
 
     def resume(self, job: Job) -> None:
+        if job.data.get("tts_engine") != "step-audio-editx-v1":
+            raise ValueError("This job used the previous TTS engine. Start a new run with a Step-Audio-EditX voice; existing downloads are preserved.")
         job.cancel_event = asyncio.Event()
         job.data["error"] = None
         job.set_status("queued")
@@ -225,6 +228,9 @@ class JobManager:
         if job.cancel_event.is_set():
             job.set_status("cancelled")
             return
+
+        if job.data.get("tts_engine") != "step-audio-editx-v1":
+            raise TTSError("Cannot mix audio from different TTS engines; start a new run")
 
         # Reachability only: an unloaded model is loaded on demand below, and
         # a resume with every chunk already on disk never needs it at all.

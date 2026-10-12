@@ -1,201 +1,233 @@
 # auto-audiobook
 
-Drop in an `.epub`, pick a cloned voice, click **Run** — get back a chaptered
-`.m4b` audiobook narrated in that voice.
-
-The narration is done by a local [chatterbox-tts](https://github.com/devnen/Chatterbox-TTS-Server)
-server, so nothing leaves the machine and there is no per-character API cost.
-
-```
- browser  ──uploads .epub──▶  auto-audiobook (FastAPI, :8005)
-                                   │  chapters ─▶ sentence-aware chunks
-                                   │  POST /tts per chunk
-                                   ▼
-                             chatterbox-tts (:8004, GPU)
-                                   │  wav per chunk
-                                   ▼
-                             ffmpeg ─▶ chaptered .m4b
-```
-
-## Requirements
-
-- **Python 3.10+** and **ffmpeg** on `PATH`
-- A **chatterbox-tts** server (default `http://localhost:8004`) — `run.sh` will
-  offer to install one for you
-- For that install: **Docker** with NVIDIA GPU support, and room for a
-  multi-GB image plus model weights
+Turn an EPUB into a chaptered `.m4b` audiobook with a local
+[Step-Audio-EditX](https://github.com/stepfun-ai/Step-Audio-EditX) narrator.
+The web app runs on port **8005**; the bundled GPU bridge runs on **8006**.
+Book text and reference recordings stay local. The first model load downloads
+public weights from Hugging Face.
 
 ## Quick start
 
+Requirements: Python **3.12** recommended for the web app, `ffmpeg` on PATH,
+and Docker with NVIDIA GPU support (Docker Desktop/WSL2 on Windows).
+The GPU container uses Linux, Python 3.12, and upstream's locked dependencies;
+there is no need to install PyTorch or vLLM in the web app's virtual environment.
+Allow substantial disk space for the CUDA image, dependencies and model weights.
+
 ```bash
-./run.sh                       # first run creates .venv and installs deps
+# From this repo, on Windows PowerShell or Linux/WSL:
+docker compose up -d --build step-audio-editx
 ```
 
-Then open **http://127.0.0.1:8005**.
+Then start the web app:
 
-*engine idle — model unloaded* is normal: see below.
-
-## The TTS server
-
-Narration is done by a [chatterbox-tts](https://github.com/devnen/Chatterbox-TTS-Server)
-server. If nothing answers on `CHATTERBOX_URL`, `run.sh` offers to set one up
-and then waits for it to come up:
-
-1. Clones the upstream repo into `CHATTERBOX_DIR` (`../chatterbox-tts-server`).
-2. Picks the compose file matching the GPU, using the mapping from upstream's
-   own README: `docker-compose-cu128.yml` for Blackwell (sm_120),
-   `docker-compose-cu130.yml` for sm_121 / CUDA 13, and the default
-   `docker-compose.yml` (CUDA 12.1) otherwise. Override with
-   `CHATTERBOX_COMPOSE_FILE`.
-3. Writes `compose.auto-audiobook.yml` next to it — an overlay, so the checkout
-   stays pristine and updatable. It blanks the `HF_TOKEN=YOUR_TOKEN_HERE`
-   placeholder every upstream compose file ships (nothing on the server reads
-   it, but `huggingface_hub` does, and sending a placeholder as a bearer token
-   turns model downloads into 401s that look like network faults), and pins the
-   published port to the one in `CHATTERBOX_URL`.
-4. `docker compose up -d`, which builds the image on first run.
-
-Expect 10–30 minutes the first time: a multi-GB CUDA image, then the model
-weights on first start. After that the container has `restart: unless-stopped`
-and is simply there.
-
-What it will not do:
-
-- **Prompt when there is no terminal.** Under a service unit it skips the
-  install rather than hanging. Set `AUDIOBOOK_INSTALL_TTS=1` to install
-  unattended, or `0` to never touch Docker.
-- **Duplicate a server you already have.** It looks for a checkout in
-  `CHATTERBOX_DIR`, `../chatterbox`, `../Chatterbox-TTS-Server` and `~`. One it
-  installed itself is restarted; one you set up yourself is left alone, with
-  the command to start it printed instead — it will not guess which compose
-  file you built it from and race your stack.
-- **Install anything for a remote `CHATTERBOX_URL`**, which is someone else's
-  server to run.
-- **Quietly fall back to CPU.** Without an NVIDIA GPU it prints what to do
-  instead. Chatterbox does run on CPU (`CHATTERBOX_COMPOSE_FILE=docker-compose-cpu.yml`),
-  but a book takes days rather than hours.
-
-## The GPU is only busy while you are making something
-
-The TTS container stays up, but its model does not stay in VRAM. This app
-loads the model when a job (or an uncached voice preview) actually needs it and
-unloads it again once nothing has needed it for `AUDIOBOOK_ENGINE_IDLE_SEC`
-(default 180s) — including at startup and shutdown, since an app with no job
-running is by definition idle. Measured on an RTX 4090 deployment: unloading
-frees ~3.9 GB and takes ~3s, and loading back takes ~11s, which is noise next
-to the hours a book takes.
-
-Consequences worth knowing:
-
-- The first chunk of a job waits ~11s for the model. Nothing else does.
-- **Resume never loads the model if every chunk is already on disk** — the
-  lease is taken on the first chunk that genuinely has to be synthesized, and
-  assembly (ffmpeg) runs with the GPU already released.
-- If you also drive chatterbox from its own UI on `:8004`, this app will pull
-  the model out from under it once it goes idle. Set
-  `AUDIOBOOK_MANAGE_ENGINE=0` to leave the server's model alone entirely; the
-  app then expects a model to already be loaded, as before.
-- `POST /api/engine/unload` frees the GPU immediately instead of waiting out
-  the timer. It refuses while a job or preview holds the model.
-
-## Using it
-
-1. **Drop your book.** The epub is parsed into chapters in reading order.
-   Copyright/contents/acknowledgement pages and very short sections are
-   unticked automatically — tick anything you do want narrated.
-2. **Pick a voice.** *Cloned voices* are reference clips on the TTS server;
-   press ▶ on any of them to hear a preview before committing hours of GPU
-   time. Use **Upload a voice clone .wav** to add your own — 10–30 seconds of
-   clean speech works well.
-3. **Run.** Progress, ETA and a live log appear under *Audiobooks*. When it
-   finishes, download the `.m4b`.
-
-Estimates shown in the UI come from measured throughput on an RTX 4090
-deployment (~14.5 characters of text per second of speech, ~3.8× faster than
-real time), so a 9-hour book takes roughly 2.4 hours to generate.
-
-## Why it is built this way
-
-- **Chunking happens here, not in the TTS server.** Each chunk is an
-  independently retryable, resumable unit, which is what makes progress
-  reporting and resume-after-crash possible on a multi-hour job.
-- **Every chunk is written to disk as it is produced.** Killing the app, or
-  the machine losing power, costs at most one chunk. Press **Resume** and it
-  reuses everything already on disk.
-- **One job at a time.** A single worker serialises GPU access; running jobs in
-  parallel on one GPU makes them all slower, not faster.
-- **The seed is fixed by default (12345).** Seed `0` means "random" to the
-  engine, and a random seed per chunk makes the narrator's timbre drift audibly
-  across a book. Leave it fixed unless you are deliberately auditioning voices.
-- **Sentence-aware splitting.** Chunks break on sentence boundaries, with an
-  abbreviation list so `Mr. Havelock` is not read as two sentences.
-
-## Layout
-
+```powershell
+# Windows
+uv venv --python 3.12 .venv-win
+uv pip install --python .venv-win\Scripts\python.exe -r requirements.txt
+.venv-win\Scripts\python.exe serve_win.py
 ```
-app/
-  main.py        FastAPI routes
-  jobs.py        job queue, persistence, resume, cancel
-  engine.py      loads the model on demand, unloads it when idle
-  epub_parse.py  epub -> ordered chapters
-  chunker.py     chapters -> sentence-aware chunks
-  tts_client.py  chatterbox client (retries, voice params)
-  audio.py       ffmpeg stitching and .m4b assembly
-static/          the single-page UI
-tests/           unit tests + test epub generator
-data/            uploads, per-job chunks, finished audiobooks (gitignored)
+
+```bash
+# Linux / WSL (creates the web app virtual environment on first run)
+./run.sh
 ```
+
+Open **http://127.0.0.1:8005**. Upload a reference recording **and its exact
+transcript**, preview the narrator, upload your EPUB, select chapters, and run.
+An idle, unloaded model is normal. The first preview/run downloads and loads
+both `stepfun-ai/Step-Audio-EditX` and `stepfun-ai/Step-Audio-Tokenizer`.
+Downloads persist in the `step-audio-models` Docker volume; references live in
+`data/step-audio-voices`.
+
+```bash
+docker compose logs -f step-audio-editx
+# Optional: download/load the model before your first preview
+curl -X POST http://127.0.0.1:8006/api/load
+```
+
+The bridge rejects other engines, so an old Chatterbox server cannot silently
+produce narration. Existing books and completed downloads are preserved.
+Old jobs cannot be resumed with EditX: start a new run, and re-upload the desired
+voice with its transcript. This avoids mixing engines in one audiobook.
+
+## Natural, clear narration
+
+The reference recording is the strongest control over voice, pace and delivery.
+Use **8–15 seconds** of relaxed, expressive narration from one speaker, with
+clear diction, steady volume, and no music, clipping, echo or overlapping voices.
+The server accepts 3–30 seconds. Enter the words exactly as spoken; do not use
+this field for instructions such as “speak naturally.”
+
+Defaults favor faithful narration:
+
+- Full model weights with BF16 inference, without 4-bit quantization.
+- Temperature **0.7**, matching upstream's generation default. Seed **12345**
+  is passed to both vLLM and the decoder's random generators. A seed makes
+  sampling repeatable; it does not guarantee identical delivery across texts
+  or different GPU/software versions. Seed zero is also a valid fixed seed.
+- Native **24 kHz mono** PCM chunks and **96 kbps AAC** audiobook output.
+- Sentence-aware **240-character** chunks, clamped to 80–300 characters,
+  aiming to stay below upstream's 30-second inference guidance. Generations
+  that hit the token limit or exceed 30 seconds fail rather than saving a
+  truncated chunk. Shorten the text/reference if this happens.
+- Original speaking pace and prosody. No time stretching, forced emotional
+  edits, or added laughs/breaths. These can distract in long-form narration.
+- Cached reference tokens and speaker features keep the conditioning consistent
+  across a book and avoid repeatedly encoding the same voice.
+- Conservative outer-silence trimming with 100 ms padding, 5 ms edge fades
+  to reduce clicks, 120 ms added between chunks and 1100 ms between chapters.
+- Two-pass whole-book loudness normalization targeting **-20 LUFS**, a
+  **-2 dBTP** ceiling and **11 LU** loudness range. This keeps one volume
+  profile across chapters; it does not separately boost each quiet phrase.
+
+These are starting defaults, not a guarantee of subjective voice quality.
+Preview several passages, including dialogue, before a long run. Preview uses
+the current temperature and seed. Lowering temperature slightly may help an
+unstable reference, but overly low values can flatten expression. Fixing a noisy
+reference or mismatched transcript is usually more useful than changing sampling.
+
+## GPU and lifecycle
+
+The bridge pins upstream source revision
+`a652e87052c109e26f616d60971376ff47a829d4` and its `uv.lock`, including the
+vLLM build used by that source. The adapter uses upstream `StepAudioTTS.clone()`
+and overrides its generation hook to pass the selected temperature and seed,
+respect the context limit, and reject truncated or invalid audio tokens.
+
+Defaults budget 40% of GPU memory for vLLM, with a 4096-token context, one
+sequence, BF16 vocoder, and CUDA graphs disabled to leave room for the tokenizer
+and vocoder. These settings are intended for a 24 GB GPU such as an RTX 4090;
+actual fit and throughput depend on other GPU workloads and installed drivers.
+Close other GPU workloads if loading reports insufficient VRAM. Do not assume
+that increasing vLLM's memory fraction leaves enough room for the other models.
+The upstream demo documents a larger GPU configuration. This repo's settings
+passed a local RTX 4090 smoke test: two English passages generated as 24 kHz
+mono PCM using upstream's test reference, and unloading returned GPU memory
+to its pre-test level. This verifies inference, not subjective narration quality.
+
+Only a preview or job loads the GPU worker. After 180 seconds idle, the app
+stops its process group, including vLLM's child processes, to release VRAM.
+The HTTP bridge and voice list stay available. Use one HTTP worker and one
+app instance per bridge. `POST /api/engine/unload` releases an idle model now.
+If sharing the bridge with another application, set `AUDIOBOOK_MANAGE_ENGINE=0`
+and manage `/api/load` and `/api/unload` yourself.
+
+## Running it as a service
+
+`run.sh` is fine for a foreground run. To keep it up across reboots there are
+two deployments in `deploy/`, and they bind the same port — run one or the
+other, not both.
+
+**Windows (native, current).** A scheduled task runs `serve_win.py` under
+`.venv-win` via `pythonw.exe`, so there is no console window to close by
+accident and everything it prints lands in `data/server.log`.
+
+```powershell
+uv venv --python 3.12 .venv-win
+uv pip install --python .venv-win\Scripts\python.exe -r requirements.txt
+powershell -ExecutionPolicy Bypass -File deploy\auto-audiobook.ps1
+```
+
+Use **3.12, not 3.14** — `lxml==5.3.0` ships no cp314 wheel, so pip falls back
+to a source build and fails looking for `libxml2`.
+
+Two details that are easy to get wrong, both explained in the script:
+
+- It starts **at logon, not at boot.** The TTS server is a Docker Desktop
+  container and Docker Desktop itself only starts at logon, so a boot-time
+  service comes up first and sits unable to reach `:8006`.
+- Restarting a dead server is done with a **1-minute repetition trigger**, not
+  Task Scheduler's restart-on-failure, which does not reliably fire when the
+  process simply dies. With `MultipleInstances=IgnoreNew` each tick is a no-op
+  while the server is healthy.
+
+`deploy\auto-audiobook.ps1 -Uninstall` removes it.
+
+**WSL / systemd (previous).** `deploy/auto-audiobook.service` runs `run.sh`
+under a systemd user unit. Replace `REPO` with the checkout path as WSL sees it
+(`/mnt/c/...`), then `systemctl --user enable --now auto-audiobook`.
+
+Note that job records store an absolute path to the finished `.m4b`, so books
+produced under one deployment are not downloadable from the other until those
+paths are rewritten.
 
 ## Configuration
 
-All optional, set as environment variables:
+Web app environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CHATTERBOX_URL` | `http://localhost:8004` | TTS server address |
-| `AUDIOBOOK_TTS_TIMEOUT` | `600` | seconds to wait for a single TTS request |
-| `AUDIOBOOK_TTS_RETRIES` | `3` | attempts per chunk before a job fails |
-| `AUDIOBOOK_MANAGE_ENGINE` | `1` | load/unload the model on demand (`0` = never touch it) |
-| `AUDIOBOOK_ENGINE_IDLE_SEC` | `180` | idle seconds before the model is unloaded |
-| `AUDIOBOOK_ENGINE_LOAD_TIMEOUT` | `600` | patience for a model load (first ever load downloads weights) |
-| `AUDIOBOOK_PORT` | `8005` | port for this app |
-| `AUDIOBOOK_HOST` | `127.0.0.1` | bind address (`0.0.0.0` to expose on LAN) |
-| `AUDIOBOOK_CHUNK_CHARS` | `240` | target characters per TTS request |
-| `AUDIOBOOK_CHAPTER_GAP_MS` | `1100` | silence between chapters |
-| `AUDIOBOOK_CHUNK_GAP_MS` | `220` | silence between chunks |
-| `AUDIOBOOK_MIN_CHAPTER_CHARS` | `300` | shorter sections start unticked |
-| `AUDIOBOOK_M4B_BITRATE` | `64k` | AAC bitrate |
-| `AUDIOBOOK_DATA_DIR` | `./data` | where books and output live |
-| `AUDIOBOOK_INSTALL_TTS` | `auto` | install chatterbox-tts when it is missing: `auto` asks on a terminal, `1` always, `0` never |
-| `CHATTERBOX_DIR` | `../chatterbox-tts-server` | where an installed TTS server lives |
-| `CHATTERBOX_REPO` | upstream GitHub URL | what to clone |
-| `CHATTERBOX_COMPOSE_FILE` | picked from the GPU | upstream compose file to build from |
-| `CHATTERBOX_WAIT_SEC` | `1200` | how long to wait for a freshly started TTS server |
+| `STEP_AUDIO_URL` | `http://localhost:8006` | Bundled EditX bridge address |
+| `AUDIOBOOK_TTS_TIMEOUT` | `600` | Seconds per synthesis request |
+| `AUDIOBOOK_TTS_RETRIES` | `3` | Attempts for transient synthesis failures |
+| `AUDIOBOOK_MANAGE_ENGINE` | `1` | Load/unload the GPU worker on demand |
+| `AUDIOBOOK_ENGINE_IDLE_SEC` | `180` | Idle time before unloading |
+| `AUDIOBOOK_ENGINE_LOAD_TIMEOUT` | `1800` | Model download/load timeout; also used by compose |
+| `AUDIOBOOK_HOST` | `127.0.0.1` | Web app bind address |
+| `AUDIOBOOK_PORT` | `8005` | Web app port |
+| `AUDIOBOOK_CHUNK_CHARS` | `240` | Characters per chunk, clamped to 80–300 |
+| `AUDIOBOOK_CHUNK_GAP_MS` | `120` | Added silence between chunks |
+| `AUDIOBOOK_CHAPTER_GAP_MS` | `1100` | Silence between chapters |
+| `AUDIOBOOK_MIN_CHAPTER_CHARS` | `300` | Shorter sections start unticked |
+| `AUDIOBOOK_M4B_BITRATE` | `96k` | AAC bitrate |
+| `AUDIOBOOK_DATA_DIR` | `./data` | Books, jobs and previews |
+| `AUDIOBOOK_INSTALL_TTS` | `auto` | `run.sh`: ask on terminal; `1` builds local Docker bridge; `0` skips |
 
-## Tests
+Compose environment variables (set before `docker compose up`):
 
-```bash
-./.venv/bin/python tests/test_units.py       # chunker + epub parsing, no GPU needed
-./.venv/bin/python tests/make_test_epub.py   # writes tests/sample-book.epub
+| Variable | Default | Meaning |
+|---|---|---|
+| `STEP_AUDIO_PORT` | `8006` | Host port; also set `STEP_AUDIO_URL` if changed |
+| `STEP_AUDIO_GPU_MEMORY_UTILIZATION` | `0.4` | Fraction reserved for vLLM |
+| `STEP_AUDIO_CONTEXT_SIZE` | `4096` | Prompt + output token context |
+
+Advanced bridge-only variables: `STEP_AUDIO_SOURCE` points to the pinned
+upstream checkout; `STEP_AUDIO_MODEL_PATH` and `STEP_AUDIO_TOKENIZER_PATH` can
+point to pre-downloaded directories mounted inside the container;
+`STEP_AUDIO_VOICES_DIR` defaults to `/data/voices`; `STEP_AUDIO_LOAD_TIMEOUT`
+defaults to 1800 seconds and `STEP_AUDIO_SYNTH_TIMEOUT` to 540 seconds.
+Use a compose override to pass these variables and corresponding mounts.
+The plain HTTP bridge is bound to loopback by default.
+
+## Layout and tests
+
+- `app/`: EPUB parsing, sentence chunking, EditX client, job queue, GPU leases,
+  resume/cancel, ffmpeg assembly and FastAPI routes.
+- `tts_server/`: local HTTP bridge, isolated model worker and Dockerfile.
+- `static/`: web UI, transcript uploads and narrator previews.
+- `compose.yml`: GPU service with persistent model and reference storage.
+- `data/`: uploaded books, references, cached chunks and finished audiobooks.
+
+```powershell
+.venv-win\Scripts\python.exe tests/test_units.py
+.venv-win\Scripts\python.exe -m unittest discover -s tests -p test_editx.py -v
 ```
+
+Linux uses `.venv/bin/python` for the same commands. CPU integration tests
+exercise the bridge HTTP contract with a mocked GPU worker, actual ffmpeg
+reference conversion, cache isolation, lifecycle, retry behavior, legacy-job
+protection and normalized M4B chapter assembly. They do not validate GPU
+inference or perceptual audio quality. With the real bridge running and a
+reference uploaded, `./tests/e2e.sh` narrates the sample EPUB end to end
+(requires curl, jq, ffmpeg and ffprobe).
 
 ## API
 
-The UI is a client of a plain REST API, usable directly:
-
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/status` | engine reachability, whether a model is resident, who is using it |
-| `POST` | `/api/engine/unload` | free the GPU now |
-| `GET` | `/api/voices` | clone + built-in voices |
-| `POST` | `/api/voices/upload` | add a voice-clone wav |
-| `POST` | `/api/voices/sample` | short preview wav |
-| `POST` | `/api/books` | upload epub, get chapters |
-| `POST` | `/api/jobs` | start a run |
-| `GET` | `/api/jobs`, `/api/jobs/{id}` | status and progress |
-| `POST` | `/api/jobs/{id}/cancel`, `/resume` | control a run |
-| `GET` | `/api/jobs/{id}/download` | finished `.m4b` |
+| `GET` | `/api/status` | Reachability, model residency and leases |
+| `POST` | `/api/engine/unload` | Free an idle GPU worker |
+| `GET` | `/api/voices` | Uploaded reference voices |
+| `POST` | `/api/voices/upload` | Multipart `file` + exact `transcript` |
+| `POST` | `/api/voices/sample` | `mode=clone`, `voice_id`, optional text, temperature, seed |
+| `POST` | `/api/books` | Upload EPUB and get chapters |
+| `POST` | `/api/jobs` | Book, chapters, `voice_mode=clone`, voice ID, temperature, seed |
+| `GET` | `/api/jobs`, `/api/jobs/{id}` | Status and progress |
+| `POST` | `/api/jobs/{id}/cancel`, `/resume` | Cancel/resume an EditX run |
+| `GET` | `/api/jobs/{id}/download` | Finished `.m4b` |
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT for this application; see [LICENSE](LICENSE). Upstream code and model
+weights retain their respective licenses.

@@ -1,4 +1,5 @@
 .venv/
+.venv-win/
 data/
 __pycache__/
 *.pyc
@@ -6,3 +7,4 @@ __pycache__/
 *.mp3
 *.wav
 .DS_Store
+compose.override.yml

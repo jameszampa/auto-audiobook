@@ -3,13 +3,13 @@
 const $ = (sel) => document.querySelector(sel);
 const state = {
   book: null,          // {book_id, title, author, chapters: [...]}
-  voices: { clone: [], predefined: [] },
+  voices: { clone: [] },
   mode: 'clone',
   voiceId: null,
   pollTimer: null,
 };
 
-const PARAMS = ['exaggeration', 'cfg_weight', 'temperature', 'speed_factor'];
+const PARAMS = ['temperature'];
 
 /* ---------- helpers ---------- */
 
@@ -167,7 +167,7 @@ function updateChapterSummary() {
   // Same arithmetic the server uses, kept live so the cost is visible up front.
   const audioHours = chars / 14.5 / 3600;
   $('#estimate').textContent = chars
-    ? `≈ ${audioHours.toFixed(2)} h of audio, about ${(audioHours / 3.8).toFixed(2)} h to generate`
+    ? `≈ ${audioHours.toFixed(2)} h of audio; generation ETA appears after starting`
     : '';
   updateRunButton();
 }
@@ -190,9 +190,7 @@ function renderVoices() {
   box.innerHTML = '';
 
   if (!list.length) {
-    box.innerHTML = state.mode === 'clone'
-      ? `<p class="muted">No cloning references yet — upload a .wav below.</p>`
-      : `<p class="muted">No built-in voices found.</p>`;
+    box.innerHTML = `<p class="muted">Add a reference recording and its transcript below.</p>`;
     return;
   }
 
@@ -233,6 +231,8 @@ async function previewVoice(voiceId, button) {
     const body = new FormData();
     body.append('mode', state.mode);
     body.append('voice_id', voiceId);
+    body.append('temperature', $('#temperature').value);
+    body.append('seed', $('#seed').value);
     const res = await fetch('/api/voices/sample', { method: 'POST', body });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     const url = URL.createObjectURL(await res.blob());
@@ -249,21 +249,29 @@ async function previewVoice(voiceId, button) {
 
 async function uploadVoice(file) {
   const status = $('#voice-upload-status');
+  const transcript = $('#voice-transcript').value.trim();
+  if (!transcript) {
+    status.textContent = 'Enter the exact reference transcript before uploading.';
+    $('#voice-input').value = '';
+    $('#voice-transcript').focus();
+    return;
+  }
   status.textContent = `Uploading ${file.name}…`;
   try {
     const body = new FormData();
     body.append('file', file);
+    body.append('transcript', transcript);
     const added = await api('/api/voices/upload', { method: 'POST', body });
     await loadVoices();
     state.mode = 'clone';
     state.voiceId = added.id;
-    document.querySelectorAll('.tab').forEach((t) =>
-      t.classList.toggle('is-active', t.dataset.mode === 'clone'));
     renderVoices();
     updateRunButton();
     status.textContent = `Added ${added.label}.`;
   } catch (e) {
     status.textContent = `Upload failed: ${e.message}`;
+  } finally {
+    $('#voice-input').value = '';
   }
 }
 
@@ -374,7 +382,7 @@ function renderJob(job) {
   meta.className = 'job-meta';
   const bits = [
     `${done.toLocaleString()} / ${total.toLocaleString()} chunks (${pct}%)`,
-    `voice: ${job.voice.id}`,
+    `voice: ${(state.voices.clone || []).find(v => v.id === job.voice.id)?.label || job.voice.id}`,
   ];
   if (job.progress.current_chapter_title && active) {
     bits.push(`now: ${job.progress.current_chapter_title}`);
@@ -437,17 +445,6 @@ function init() {
   $('#book-reset').addEventListener('click', resetDrop);
   $('#select-all').addEventListener('click', () => setAllChapters(true));
   $('#select-none').addEventListener('click', () => setAllChapters(false));
-
-  document.querySelectorAll('.tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((t) => t.classList.remove('is-active'));
-      tab.classList.add('is-active');
-      state.mode = tab.dataset.mode;
-      state.voiceId = null;
-      renderVoices();
-      updateRunButton();
-    });
-  });
 
   $('#voice-input').addEventListener('change', (e) => {
     if (e.target.files[0]) uploadVoice(e.target.files[0]);

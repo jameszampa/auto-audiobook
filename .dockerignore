@@ -1,0 +1,5 @@
+*
+!tts_server/
+!tts_server/**
+**/__pycache__
+**/*.pyc

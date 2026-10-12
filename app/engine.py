@@ -1,9 +1,6 @@
 """Keeps the TTS model in VRAM only while something is actually using it.
 
-The chatterbox container is long-lived (`restart: unless-stopped`) and loads
-its model at boot, so without this the ~4 GB stays pinned all day for a machine
-that narrates a book now and then. Measured on an RTX 4090 deployment: unloading
-takes ~3s and reloading ~11s, which is cheap next to the hours of GPU a book costs.
+The bridge starts its GPU worker on demand and stops it when idle.
 
 Work takes a *lease*; the model is loaded before the first lease is granted and
 unloaded once the last one has been released for `idle_sec`. Leases are counted
@@ -16,7 +13,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from .tts_client import ChatterboxClient, TTSError
+from .tts_client import StepAudioEditXClient, TTSError
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +21,7 @@ log = logging.getLogger(__name__)
 class EngineLifecycle:
     def __init__(
         self,
-        client: ChatterboxClient,
+        client: StepAudioEditXClient,
         *,
         enabled: bool = True,
         idle_sec: float = 180.0,
@@ -97,7 +94,7 @@ class EngineLifecycle:
         if not self.enabled:
             # Not ours to load - say so rather than failing obscurely later.
             raise TTSError(
-                "chatterbox has no model loaded and AUDIOBOOK_MANAGE_ENGINE=0"
+                "Step-Audio-EditX has no model loaded and AUDIOBOOK_MANAGE_ENGINE=0"
             )
         log.info("loading TTS model for %s", who)
         message = await self.client.load()

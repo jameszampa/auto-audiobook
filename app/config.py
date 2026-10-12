@@ -11,9 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class Settings:
-    # Where the chatterbox-tts server is listening. The deployed container
-    # publishes 8004 on the host.
-    chatterbox_url: str = os.environ.get("CHATTERBOX_URL", "http://localhost:8004")
+    # Dedicated bridge port; avoids accidentally connecting to the old engine.
+    step_audio_url: str = os.environ.get("STEP_AUDIO_URL", "http://localhost:8006")
 
     data_dir: Path = Path(os.environ.get("AUDIOBOOK_DATA_DIR", ROOT / "data"))
 
@@ -28,27 +27,26 @@ class Settings:
     # The model sits in VRAM whether or not anything is narrating, so this app
     # loads it when a job (or a voice preview) actually needs it and releases
     # it again once nothing does. Set 0 to leave the TTS server alone - useful
-    # if you also drive it from its own UI on :8004.
+    # if you also drive it from another application.
     manage_engine: bool = os.environ.get("AUDIOBOOK_MANAGE_ENGINE", "1") not in ("0", "false", "no")
-    # Grace period before an idle model is unloaded. Reloading costs ~11s, so a
+    # Grace period before an idle model is unloaded. Model loading is expensive, so a
     # couple of minutes avoids paying that between back-to-back jobs.
     engine_idle_sec: float = float(os.environ.get("AUDIOBOOK_ENGINE_IDLE_SEC", "180"))
     # Generous: the very first load of a model downloads weights.
-    engine_load_timeout_sec: float = float(os.environ.get("AUDIOBOOK_ENGINE_LOAD_TIMEOUT", "600"))
+    engine_load_timeout_sec: float = float(os.environ.get("AUDIOBOOK_ENGINE_LOAD_TIMEOUT", "1800"))
 
-    # Target characters per TTS request. Chatterbox can split text itself, but
-    # we chunk up front so progress, resume and retry work per chunk.
-    chunk_chars: int = int(os.environ.get("AUDIOBOOK_CHUNK_CHARS", "240"))
+    # Keep each generation comfortably below upstream's 30-second guidance.
+    chunk_chars: int = min(300, max(80, int(os.environ.get("AUDIOBOOK_CHUNK_CHARS", "240"))))
 
     # Silence inserted when stitching, in milliseconds.
-    gap_between_chunks_ms: int = int(os.environ.get("AUDIOBOOK_CHUNK_GAP_MS", "220"))
+    gap_between_chunks_ms: int = int(os.environ.get("AUDIOBOOK_CHUNK_GAP_MS", "120"))
     gap_between_chapters_ms: int = int(os.environ.get("AUDIOBOOK_CHAPTER_GAP_MS", "1100"))
 
     # Chapters shorter than this are usually title/copyright pages.
     min_chapter_chars: int = int(os.environ.get("AUDIOBOOK_MIN_CHAPTER_CHARS", "300"))
 
-    sample_rate: int = 24000  # chatterbox turbo output rate
-    m4b_bitrate: str = os.environ.get("AUDIOBOOK_M4B_BITRATE", "64k")
+    sample_rate: int = 24000  # Step-Audio-EditX native output rate
+    m4b_bitrate: str = os.environ.get("AUDIOBOOK_M4B_BITRATE", "96k")
 
     @property
     def books_dir(self) -> Path:

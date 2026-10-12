@@ -51,14 +51,18 @@
   <!-- Step 2: the voice -->
   <section class="card">
     <h2><span class="step">2</span> Pick a voice</h2>
-    <div class="tabs" role="tablist">
-      <button class="tab is-active" data-mode="clone" role="tab">Cloned voices</button>
-      <button class="tab" data-mode="predefined" role="tab">Built&#8209;in voices</button>
-    </div>
+    <p class="hint">Step-Audio-EditX follows your reference voice. Choose clean, relaxed
+      narration with clear diction and no background music.</p>
     <div id="voice-list" class="voices"><p class="muted">Loading voices&hellip;</p></div>
 
+    <label class="reference-transcript" for="voice-transcript">Reference transcript
+      <textarea id="voice-transcript" rows="3" maxlength="2000"
+        placeholder="Type the exact words spoken in your reference recording before uploading."></textarea>
+    </label>
+    <p class="hint">Use 8–15 seconds of a single speaker (3–30 seconds accepted).
+      Match every word and punctuation to the recording for the clearest result.</p>
     <div class="upload-row">
-      <label class="btn btn-ghost btn-sm" for="voice-input">Upload a voice clone .wav</label>
+      <label class="btn btn-ghost btn-sm" for="voice-input">Upload reference .wav or .mp3</label>
       <input type="file" id="voice-input" accept=".wav,.mp3" hidden>
       <span id="voice-upload-status" class="muted"></span>
     </div>
@@ -66,30 +70,14 @@
     <details class="advanced">
       <summary>Narration settings</summary>
       <div class="grid">
-        <label>Expressiveness
-          <input type="range" id="exaggeration" min="0.25" max="2" step="0.05" value="0.5">
-          <output id="exaggeration-out">0.50</output>
-          <span class="hint">Lower is steadier. 0.5 suits long-form narration.</span>
-        </label>
-        <label>Pacing (CFG)
-          <input type="range" id="cfg_weight" min="0.2" max="1" step="0.05" value="0.5">
-          <output id="cfg_weight-out">0.50</output>
-          <span class="hint">Higher sticks closer to the reference delivery.</span>
-        </label>
         <label>Temperature
-          <input type="range" id="temperature" min="0.1" max="1.5" step="0.05" value="0.8">
-          <output id="temperature-out">0.80</output>
-          <span class="hint">Randomness per chunk.</span>
-        </label>
-        <label>Speed
-          <input type="range" id="speed_factor" min="0.5" max="2" step="0.05" value="1">
-          <output id="speed_factor-out">1.00</output>
-          <span class="hint">Applied after generation.</span>
+          <input type="range" id="temperature" min="0.1" max="1.2" step="0.05" value="0.7">
+          <output id="temperature-out">0.70</output>
+          <span class="hint">0.7 keeps natural variation. Preview before changing it.</span>
         </label>
         <label>Seed
-          <input type="number" id="seed" value="12345" min="0" step="1">
-          <span class="hint">Keep this fixed. A changing seed makes the
-            narrator's timbre drift between chunks.</span>
+          <input type="number" id="seed" value="12345" min="0" max="2147483647" step="1">
+          <span class="hint">Keep fixed for repeatable sampling. Delivery and pace follow the reference.</span>
         </label>
       </div>
     </details>

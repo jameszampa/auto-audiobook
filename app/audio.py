@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 import shlex
 import wave
 from pathlib import Path
@@ -16,7 +18,7 @@ class AudioError(RuntimeError):
     pass
 
 
-async def _run(cmd: list[str]) -> None:
+async def _run(cmd: list[str]) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -28,6 +30,7 @@ async def _run(cmd: list[str]) -> None:
             f"command failed ({proc.returncode}): {shlex.join(cmd)}\n"
             f"{err.decode(errors='replace')[-800:]}"
         )
+    return err.decode(errors="replace")
 
 
 def wav_duration(path: Path) -> float:
@@ -112,7 +115,7 @@ async def build_m4b(
     author: str,
     gap_ms: int,
     sample_rate: int,
-    bitrate: str = "64k",
+    bitrate: str = "96k",
     cover: Path | None = None,
 ) -> dict:
     """Join chapter wavs with gaps and encode a chapterised .m4b."""
@@ -138,6 +141,27 @@ async def build_m4b(
     joined = work_dir / "book.wav"
     await concat_wavs(ordered, joined, work_dir)
 
+    # Measure the entire book, then apply one gain profile. Normalizing every
+    # chunk independently would amplify quiet passages and flatten expression.
+    report = await _run([
+        "ffmpeg", "-hide_banner", "-nostats", "-y", "-i", str(joined),
+        "-af", "loudnorm=I=-20:TP=-2:LRA=11:print_format=json",
+        "-f", "null", "-",
+    ])
+    matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', report, re.DOTALL)
+    if not matches:
+        raise AudioError("ffmpeg did not return a loudness measurement")
+    measured = json.loads(matches[-1])
+    keys = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+    if not all(math.isfinite(float(measured[k])) for k in keys):
+        raise AudioError("Cannot normalize silent or invalid narration")
+    loudness_filter = (
+        "loudnorm=I=-20:TP=-2:LRA=11:linear=true:"
+        f"measured_I={measured['input_i']}:measured_TP={measured['input_tp']}:"
+        f"measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}:"
+        f"offset={measured['target_offset']}"
+    )
+
     meta_path = work_dir / "chapters.ffmeta"
     meta_path.write_text(_ffmetadata(title, author, marks), encoding="utf-8")
 
@@ -153,7 +177,8 @@ async def build_m4b(
     cmd += ["-map", "0:a", "-map_metadata", "1"]
     if cover and cover.exists():
         cmd += ["-map", "2:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
-    cmd += ["-c:a", "aac", "-b:a", bitrate, "-movflags", "+faststart", "-f", "mp4",
+    cmd += ["-af", loudness_filter, "-ar", str(sample_rate), "-ac", "1",
+            "-c:a", "aac", "-b:a", bitrate, "-movflags", "+faststart", "-f", "mp4",
             str(out_path)]
 
     await _run(cmd)

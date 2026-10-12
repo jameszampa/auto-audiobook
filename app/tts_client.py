@@ -1,8 +1,4 @@
-"""Client for the chatterbox-tts server.
-
-Endpoint paths and field names below are taken from the server's own
-server.py / models.py (CustomTTSRequest), not inferred.
-"""
+"""Client for this repository's Step-Audio-EditX HTTP bridge."""
 
 from __future__ import annotations
 
@@ -21,22 +17,17 @@ class TTSError(RuntimeError):
 
 @dataclass
 class VoiceParams:
-    """Generation knobs exposed by /tts."""
+    """Sampling controls implemented by the EditX bridge."""
 
-    temperature: float = 0.8
-    exaggeration: float = 0.5   # calmer than the server default; suits narration
-    cfg_weight: float = 0.5
-    speed_factor: float = 1.0
-    # A fixed non-zero seed keeps timbre stable across thousands of chunks.
-    # Seed 0 means "random" to the engine, which makes a book drift.
+    temperature: float = 0.7  # upstream sampling default; retain natural variation
+    # Reproducible sampling; voice consistency primarily comes from the reference.
     seed: int = 12345
-    language: str = "en"
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-class ChatterboxClient:
+class StepAudioEditXClient:
     def __init__(
         self,
         base_url: str,
@@ -56,7 +47,10 @@ class ChatterboxClient:
         async with await self._client() as c:
             r = await c.get("/api/model-info", timeout=15)
             r.raise_for_status()
-            return r.json()
+            info = r.json()
+            if info.get("engine") != "step-audio-editx":
+                raise TTSError("expected the Step-Audio-EditX bridge; check STEP_AUDIO_URL")
+            return info
 
     async def engine_state(self) -> dict:
         """Reachability and residency, reported separately.
@@ -70,7 +64,7 @@ class ChatterboxClient:
             return {
                 "reachable": False,
                 "loaded": False,
-                "detail": f"cannot reach chatterbox at {self.base_url}: {e}",
+                "detail": f"cannot reach Step-Audio-EditX at {self.base_url}: {e}",
             }
         if not info.get("loaded"):
             return {"reachable": True, "loaded": False, "detail": "model unloaded"}
@@ -81,17 +75,11 @@ class ChatterboxClient:
         }
 
     async def load(self) -> str:
-        """Load the model named in the server's config into VRAM.
-
-        /restart_server is the server's model hot-swap: it drops whatever is
-        resident and loads from config, and is the only way back after
-        /api/unload. It returns once the model is actually loaded (measured
-        ~11s for chatterbox-turbo on this box), so no polling is needed.
-        """
+        """Start the isolated GPU worker and wait for model readiness."""
         async with httpx.AsyncClient(
             base_url=self.base_url, timeout=self.load_timeout
         ) as c:
-            r = await c.post("/restart_server")
+            r = await c.post("/api/load")
         if r.status_code != 200:
             raise TTSError(f"model load failed (HTTP {r.status_code}): {r.text[:200]}")
         try:
@@ -100,7 +88,7 @@ class ChatterboxClient:
             return "loaded"
 
     async def unload(self) -> None:
-        """Drop the model and release its VRAM. Takes ~3s."""
+        """Stop the GPU worker, releasing tokenizer, vocoder and vLLM memory."""
         async with await self._client() as c:
             r = await c.post("/api/unload", timeout=120)
         if r.status_code != 200:
@@ -108,29 +96,25 @@ class ChatterboxClient:
                 f"model unload failed (HTTP {r.status_code}): {r.text[:200]}"
             )
 
-    async def list_reference_files(self) -> list[str]:
+    async def list_reference_files(self) -> list[dict]:
         """Voice-cloning reference clips available on the server."""
         async with await self._client() as c:
-            r = await c.get("/get_reference_files", timeout=15)
+            r = await c.get("/api/voices", timeout=15)
             r.raise_for_status()
             return r.json()
 
-    async def list_predefined_voices(self) -> list[dict]:
-        async with await self._client() as c:
-            r = await c.get("/get_predefined_voices", timeout=15)
-            r.raise_for_status()
-            return r.json()
-
-    async def upload_reference(self, filename: str, data: bytes) -> None:
-        """Add a new voice-clone wav to the server's reference_audio folder."""
+    async def upload_reference(self, filename: str, data: bytes, transcript: str) -> dict:
+        """Store an immutable reference recording with its exact transcript."""
         async with await self._client() as c:
             r = await c.post(
-                "/upload_reference",
-                files={"files": (filename, data, "audio/wav")},
+                "/api/voices/upload",
+                files={"file": (filename, data, "application/octet-stream")},
+                data={"transcript": transcript},
                 timeout=120,
             )
             if r.status_code != 200:
                 raise TTSError(f"upload failed ({r.status_code}): {r.text[:300]}")
+            return r.json()
 
     async def synth(
         self,
@@ -139,36 +123,30 @@ class ChatterboxClient:
         voice_id: str,
         params: VoiceParams,
     ) -> bytes:
-        """Synthesize one chunk and return WAV bytes.
-
-        ``voice_mode`` is "clone" (voice_id is a reference wav filename) or
-        "predefined" (voice_id is a built-in voice filename).
-        """
+        """Synthesize one chunk and return mono 24 kHz PCM WAV bytes."""
+        if voice_mode != "clone":
+            raise TTSError("Step-Audio-EditX requires a reference voice and transcript")
         payload: dict = {
             "text": text,
-            "voice_mode": voice_mode,
-            "output_format": "wav",
-            # We already chunked; letting the server split again would blur the
-            # mapping between a request and a resumable unit of work.
-            "split_text": False,
+            "voice_id": voice_id,
             **params.as_dict(),
         }
-        if voice_mode == "clone":
-            payload["reference_audio_filename"] = voice_id
-        else:
-            payload["predefined_voice_id"] = voice_id
 
         last_error = ""
         for attempt in range(1, self.retries + 1):
             try:
                 async with await self._client() as c:
                     r = await c.post("/tts", json=payload)
-                if r.status_code == 200 and r.content[:4] == b"RIFF":
+                if r.status_code == 200 and r.content[:4] == b"RIFF" and r.content[8:12] == b"WAVE":
                     return r.content
+                if 400 <= r.status_code < 500 and r.status_code != 429:
+                    raise TTSError(f"HTTP {r.status_code}: {r.text[:300]}")
                 if r.status_code == 200:
                     last_error = "response was not a RIFF/WAV payload"
                 else:
                     last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+            except TTSError:
+                raise
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
 

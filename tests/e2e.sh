@@ -14,7 +14,7 @@ bad() { echo "  FAIL: $*"; fail=$((fail+1)); }
 echo "== engine + app =="
 status=$(curl -fsS --max-time 10 "$BASE/api/status") || { bad "app unreachable"; exit 1; }
 echo "    $status"
-[ "$(echo "$status" | jq -r .ready)" = "true" ] && ok "engine ready" || { bad "engine not ready"; exit 1; }
+[ "$(echo "$status" | jq -r .reachable)" = "true" ] && ok "engine ready" || { bad "engine not ready"; exit 1; }
 
 echo "== voices =="
 voices=$(curl -fsS "$BASE/api/voices")

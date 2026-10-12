@@ -263,3 +263,6 @@ main {
   color: var(--muted);
   white-space: pre-wrap;
 }
+
+.reference-transcript { display: grid; gap: 8px; margin-top: 16px; }
+.reference-transcript textarea { width: 100%; box-sizing: border-box; padding: 10px; font: inherit; border: 1px solid #888; border-radius: 6px; }

@@ -1,0 +1,26 @@
+services:
+  step-audio-editx:
+    build:
+      context: .
+      dockerfile: tts_server/Dockerfile
+    restart: unless-stopped
+    init: true
+    gpus: all
+    shm_size: 2gb
+    ports:
+      - "127.0.0.1:${STEP_AUDIO_PORT:-8006}:8006"
+    environment:
+      STEP_AUDIO_GPU_MEMORY_UTILIZATION: ${STEP_AUDIO_GPU_MEMORY_UTILIZATION:-0.4}
+      STEP_AUDIO_CONTEXT_SIZE: ${STEP_AUDIO_CONTEXT_SIZE:-4096}
+      STEP_AUDIO_LOAD_TIMEOUT: ${AUDIOBOOK_ENGINE_LOAD_TIMEOUT:-1800}
+    volumes:
+      - step-audio-models:/models
+      - ./data/step-audio-voices:/data/voices
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/api/model-info', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  step-audio-models:

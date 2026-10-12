@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import uuid
@@ -17,8 +18,8 @@ from .chunker import chunk_text
 from .config import ROOT, SETTINGS
 from .engine import EngineLifecycle
 from .epub_parse import parse_epub
-from .jobs import JobManager, slugify
-from .tts_client import ChatterboxClient, TTSError, VoiceParams
+from .jobs import JobManager
+from .tts_client import StepAudioEditXClient, TTSError, VoiceParams
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,8 +27,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("auto-audiobook")
 
-client = ChatterboxClient(
-    SETTINGS.chatterbox_url,
+client = StepAudioEditXClient(
+    SETTINGS.step_audio_url,
     timeout=SETTINGS.tts_timeout_sec,
     retries=SETTINGS.tts_retries,
     load_timeout=SETTINGS.engine_load_timeout_sec,
@@ -50,8 +51,8 @@ async def lifespan(app: FastAPI):
     manager.start_worker()
     state = await client.engine_state()
     log.info(
-        "chatterbox at %s: %s%s",
-        SETTINGS.chatterbox_url,
+        "Step-Audio-EditX at %s: %s%s",
+        SETTINGS.step_audio_url,
         state["detail"],
         "" if not SETTINGS.manage_engine else
         f" (model managed here: loaded on demand, unloaded after "
@@ -84,7 +85,7 @@ async def status() -> dict:
     An idle app deliberately leaves no model in VRAM, so "not loaded" is a
     normal state and must not read as an outage.
     """
-    return {**await engine.state(), "url": SETTINGS.chatterbox_url}
+    return {**await engine.state(), "url": SETTINGS.step_audio_url}
 
 
 @app.post("/api/engine/unload")
@@ -101,21 +102,16 @@ async def voices() -> dict:
     """Clone references first - they are the point of the app."""
     try:
         clone = await client.list_reference_files()
-        predefined = await client.list_predefined_voices()
     except Exception as e:
-        raise HTTPException(502, f"cannot list voices from chatterbox: {e}")
+        raise HTTPException(502, f"cannot list voices from Step-Audio-EditX: {e}")
 
     return {
-        "clone": [{"id": f, "label": Path(f).stem} for f in clone],
-        "predefined": [
-            {"id": v.get("filename", ""), "label": v.get("display_name") or v.get("filename", "")}
-            for v in predefined
-        ],
+        "clone": clone,
     }
 
 
 @app.post("/api/voices/upload")
-async def upload_voice(file: UploadFile = File(...)) -> dict:
+async def upload_voice(file: UploadFile = File(...), transcript: str = Form(...)) -> dict:
     """Add your own voice-clone wav to the shared list."""
     name = Path(file.filename or "").name
     if not name.lower().endswith((".wav", ".mp3")):
@@ -123,14 +119,18 @@ async def upload_voice(file: UploadFile = File(...)) -> dict:
     if not SAFE_NAME.match(name):
         raise HTTPException(400, "filename may only contain letters, numbers, spaces, . _ -")
 
-    data = await file.read()
+    if not transcript.strip() or len(transcript) > 2000:
+        raise HTTPException(400, "enter the exact reference transcript (1–2000 characters)")
+    data = await file.read(20 * 1024 * 1024 + 1)
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(413, "reference recording must be smaller than 20 MB")
     if not data:
         raise HTTPException(400, "uploaded file is empty")
     try:
-        await client.upload_reference(name, data)
+        voice = await client.upload_reference(name, data, transcript.strip())
     except TTSError as e:
         raise HTTPException(502, str(e))
-    return {"ok": True, "id": name, "label": Path(name).stem}
+    return {"ok": True, **voice}
 
 
 @app.post("/api/voices/sample")
@@ -138,19 +138,26 @@ async def voice_sample(
     mode: str = Form(...),
     voice_id: str = Form(...),
     text: str = Form("This is how the narrator will sound reading your book."),
+    temperature: float = Form(0.7, ge=0.1, le=1.2),
+    seed: int = Form(12345, ge=0, le=2147483647),
 ) -> Response:
     """Short preview so a voice can be judged before committing hours of GPU."""
-    if mode not in ("clone", "predefined"):
-        raise HTTPException(400, "mode must be 'clone' or 'predefined'")
+    if mode != "clone":
+        raise HTTPException(400, "Step-Audio-EditX supports cloned reference voices")
     if not SAFE_NAME.match(Path(voice_id).name) or Path(voice_id).name != voice_id:
         raise HTTPException(400, "invalid voice id")
 
-    cache = SETTINGS.samples_dir / f"{mode}_{slugify(voice_id)}.wav"
+    text = text.strip()
+    if not text or len(text) > 300:
+        raise HTTPException(400, "preview text must be 1–300 characters")
+    params = VoiceParams(temperature=temperature, seed=seed)
+    key = hashlib.sha256(json.dumps(["step-audio-editx-v1", voice_id, text, params.as_dict()], sort_keys=True).encode()).hexdigest()
+    cache = SETTINGS.samples_dir / f"editx_{key}.wav"
     if not cache.exists():
         # Cached previews are served without ever waking the GPU.
         try:
             async with engine.leased(f"preview {voice_id}"):
-                audio = await client.synth(text[:300], mode, voice_id, VoiceParams())
+                audio = await client.synth(text, mode, voice_id, params)
         except TTSError as e:
             raise HTTPException(502, str(e))
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -217,16 +224,12 @@ def _load_book(book_id: str) -> dict:
 
 
 def _estimate(chars: int) -> dict:
-    """Rough audio length and runtime.
-
-    ~14.5 chars/second of speech and ~3.8x faster than real-time were both
-    measured against an RTX 4090 deployment rather than assumed.
-    """
+    """Rough speech duration; runtime is measured once generation starts."""
     audio_sec = chars / 14.5
     return {
         "chars": chars,
         "audio_hours": round(audio_sec / 3600, 2),
-        "compute_hours": round(audio_sec / 3.8 / 3600, 2),
+        "compute_hours": None,
     }
 
 
@@ -247,15 +250,18 @@ async def create_job(
     voice_mode: str = Form(...),
     voice_id: str = Form(...),
     chapters: str = Form(...),
-    exaggeration: float = Form(0.5),
-    cfg_weight: float = Form(0.5),
-    temperature: float = Form(0.8),
-    speed_factor: float = Form(1.0),
-    seed: int = Form(12345),
+    temperature: float = Form(0.7, ge=0.1, le=1.2),
+    seed: int = Form(12345, ge=0, le=2147483647),
 ) -> dict:
     book = _load_book(book_id)
-    if voice_mode not in ("clone", "predefined"):
-        raise HTTPException(400, "voice_mode must be 'clone' or 'predefined'")
+    if voice_mode != "clone":
+        raise HTTPException(400, "Step-Audio-EditX requires a cloned reference voice")
+    try:
+        available = await client.list_reference_files()
+    except Exception as e:
+        raise HTTPException(502, f"cannot list reference voices: {e}")
+    if voice_id not in {v["id"] for v in available}:
+        raise HTTPException(400, "upload a reference recording and transcript, then select it")
 
     try:
         wanted = sorted({int(i) for i in json.loads(chapters)})
@@ -280,9 +286,6 @@ async def create_job(
 
     params = VoiceParams(
         temperature=temperature,
-        exaggeration=exaggeration,
-        cfg_weight=cfg_weight,
-        speed_factor=speed_factor,
         seed=seed,
     )
     job = manager.create(
@@ -336,7 +339,10 @@ async def resume_job(job_id: str) -> dict:
     job = _get_job(job_id)
     if job.status in ("queued", "running", "assembling"):
         raise HTTPException(400, "job is already active")
-    manager.resume(job)
+    try:
+        manager.resume(job)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
     return {"ok": True, "status": job.status}
 
 
